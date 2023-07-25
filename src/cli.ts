@@ -1,6 +1,6 @@
 import { ArgumentParser } from 'argparse';
 
-import backup from './index';
+import createBackup from './index';
 
 const parser = new ArgumentParser({ description: 'Backup MongoDB databases.' });
 
@@ -17,7 +17,7 @@ parser.add_argument('--meta', {
 
 const { uri, dest, serializer, meta } = parser.parse_args();
 
-backup({
+createBackup({
   uri,
   serializer,
   includeMetadata: meta,

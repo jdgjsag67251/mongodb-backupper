@@ -3,9 +3,9 @@
 ## Example
 
 ```ts
-import backup from 'mongodb-backupper';
+import createBackup from 'mongodb-backupper';
 
-backup({
+createBackup({
   uri: 'mongodb://localhost:27017/db',
   destinationPath: './backup',
 }).catch(console.error);
