@@ -4,6 +4,8 @@ import bsonSerializer from './serializers/bson';
 import jsonSerializer from './serializers/json';
 import ejsonSerializer from './serializers/ejson';
 
+import zlibCompression from './compression/zlib';
+
 export {
   // Outputs
   fileOutput,
@@ -12,4 +14,7 @@ export {
   bsonSerializer,
   jsonSerializer,
   ejsonSerializer,
+
+  // Compression
+  zlibCompression,
 };

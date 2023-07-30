@@ -40,21 +40,21 @@ export type Options = {
      *  Accepts a document\
      *  Returns a document
      */
-    beforeSerialization?: () => Promise<TransformStreamResult>;
+    beforeSerialization: (() => Promise<TransformStreamResult>)[];
     /**
      * Transform the documents before serialization\
      *  Every chunk is guaranteed to be a document\
      *  Accepts a serialized document\
      *  Returns a (modified) serialized document
      */
-    afterSerialization?: () => Promise<TransformStreamResult>;
+    afterSerialization: (() => Promise<TransformStreamResult>)[];
     /**
      * Transform the serialized stream before writing to the output stream\
      *  Chunks are NOT guaranteed to be a document\
      *  Accepts a buffer stream\
      *  Returns a buffer stream
      */
-    beforeOutput?: () => Promise<TransformStreamResult>;
+    beforeOutput: (() => Promise<TransformStreamResult>)[];
   };
   /** Collections to be exported */
   collections: string[] | undefined;

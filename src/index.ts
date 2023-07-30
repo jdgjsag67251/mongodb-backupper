@@ -1,3 +1,4 @@
+import type { PartialDeep } from 'type-fest';
 import { MongoClient } from 'mongodb';
 import merge from 'lodash.merge';
 
@@ -18,9 +19,13 @@ export const defaultOptions = Object.freeze<Options>({
   collections: undefined,
   includeMetadata: false,
   restoreBatchSize: 12,
-  transformStream: {},
   logger: () => {},
   query: {},
+  transformStream: {
+    beforeSerialization: [],
+    afterSerialization: [],
+    beforeOutput: [],
+  },
   options: {
     maxPoolSize: 11,
   },
@@ -57,7 +62,7 @@ export default class MongoDBBackupper extends PrivateConstructor {
     /** Handler for the final output stream */
     outputStreamHandler: OutputStreamHandler,
     /** General options */
-    options?: Partial<Options>,
+    options?: PartialDeep<Options>,
   ): Promise<MongoDBBackupper> {
     const formattedOptions = MongoDBBackupper.formatOptions(options);
 
@@ -68,7 +73,7 @@ export default class MongoDBBackupper extends PrivateConstructor {
     return super.handleCreate(MongoDBBackupper)(client, outputStreamHandler, formattedOptions);
   }
 
-  private static formatOptions(options: Partial<Options> | undefined): Options {
+  private static formatOptions(options: PartialDeep<Options> | undefined): Options {
     const mergedOptions: Options = merge({}, defaultOptions, options ?? {});
 
     if (
@@ -91,6 +96,12 @@ export default class MongoDBBackupper extends PrivateConstructor {
     }
 
     mergedOptions.includeMetadata = !!mergedOptions.includeMetadata;
+
+    (Object.keys(options?.transformStream ?? {}) as (keyof Options['transformStream'])[]).forEach((key) => {
+      const value = (options?.transformStream?.[key] ?? []) as Options['transformStream'][typeof key];
+
+      mergedOptions.transformStream[key] = value;
+    });
 
     return mergedOptions;
   }

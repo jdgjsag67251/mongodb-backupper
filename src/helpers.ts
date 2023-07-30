@@ -5,7 +5,6 @@ import { Transform } from 'stream';
 import { SerializerResult } from './types';
 
 export class PrivateConstructor {
-  // @ts-expect-error
   static #isInternalConstructing = false;
 
   constructor() {

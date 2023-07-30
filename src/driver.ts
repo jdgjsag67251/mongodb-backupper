@@ -1,5 +1,5 @@
-import { Collection, Db, Document, IndexDescription, MongoClient } from 'mongodb';
-import { promises as Stream, Readable, Writable } from 'stream';
+import { Collection, Db, Document, MongoClient } from 'mongodb';
+import { promises as Stream, Readable, Writable, Transform } from 'stream';
 import type { Stream as StreamType } from 'stream';
 
 import type { Options, OutputDetails, OutputStreamHandler } from './types';
@@ -89,12 +89,12 @@ export const backup = async (
   const db = client.db();
   log('Database opened');
 
-  const [serializationStreamHandler, beforeSerializationHandler, afterSerializationHandler, beforeOutputHandler] =
+  const [serializationStreamHandler, beforeSerializationHandlers, afterSerializationHandlers, beforeOutputHandlers] =
     await Promise.all([
       options.serializationStream(),
-      options.transformStream.beforeSerialization?.(),
-      options.transformStream.afterSerialization?.(),
-      options.transformStream.beforeOutput?.(),
+      Promise.all(options.transformStream.beforeSerialization.map((func) => func())),
+      Promise.all(options.transformStream.afterSerialization.map((func) => func())),
+      Promise.all(options.transformStream.beforeOutput.map((func) => func())),
     ]);
 
   const handlePipeline = async (inputStream: Readable, details: Omit<OutputDetails, 'fileExtension'>) => {
@@ -103,10 +103,10 @@ export const backup = async (
     return Stream.pipeline(
       [
         inputStream,
-        await beforeSerializationHandler?.backup(outputDetails),
+        ...(await Promise.all(beforeSerializationHandlers.map((handler) => handler.backup(outputDetails)))),
         await serializationStreamHandler.serialize(outputDetails),
-        await afterSerializationHandler?.backup(outputDetails),
-        await beforeOutputHandler?.backup(outputDetails),
+        ...(await Promise.all(afterSerializationHandlers.map((handler) => handler.backup(outputDetails)))),
+        ...(await Promise.all(beforeOutputHandlers.map((handler) => handler.backup(outputDetails)))),
         await outputStreamHandler.backup(outputDetails),
       ].filter((entry): entry is NonNullable<typeof entry> => !!entry),
     );
@@ -145,12 +145,12 @@ export const restore = async (
   const db = client.db();
   log('Database opened');
 
-  const [serializationStreamHandler, beforeSerializationHandler, afterSerializationHandler, beforeOutputHandler] =
+  const [serializationStreamHandler, beforeSerializationHandlers, afterSerializationHandlers, beforeOutputHandlers] =
     await Promise.all([
       options.serializationStream(),
-      options.transformStream.beforeSerialization?.(),
-      options.transformStream.afterSerialization?.(),
-      options.transformStream.beforeOutput?.(),
+      Promise.all(options.transformStream.beforeSerialization.map((func) => func())),
+      Promise.all(options.transformStream.afterSerialization.map((func) => func())),
+      Promise.all(options.transformStream.beforeOutput.map((func) => func())),
     ]);
 
   const handlePipeline = async (outputStream: Writable, details: Omit<OutputDetails, 'fileExtension'>) => {
@@ -159,10 +159,10 @@ export const restore = async (
     return Stream.pipeline(
       [
         await outputStreamHandler.restore.getCollection(outputDetails),
-        await afterSerializationHandler?.restore(outputDetails),
+        ...(await Promise.all(beforeOutputHandlers.map((handler) => handler.restore(outputDetails)))),
+        ...(await Promise.all(afterSerializationHandlers.map((handler) => handler.restore(outputDetails)))),
         await serializationStreamHandler.deserialize(outputDetails),
-        await beforeSerializationHandler?.restore(outputDetails),
-        await beforeOutputHandler?.restore(outputDetails),
+        ...(await Promise.all(beforeSerializationHandlers.map((handler) => handler.restore(outputDetails)))),
         outputStream,
       ].filter((entry): entry is NonNullable<typeof entry> => !!entry),
     );
