@@ -1,56 +1,23 @@
-import { BSON, Collection, Db, Document, MongoClient } from 'mongodb';
-import { Transform, promises as Stream } from 'stream';
-import { promises as fs, createWriteStream } from 'fs';
-import path from 'path';
+import { Collection, Db, Document, IndexDescription, MongoClient } from 'mongodb';
+import { promises as Stream, Readable, Writable } from 'stream';
+import type { Stream as StreamType } from 'stream';
 
-import type { MetadataHandler, Options, SerializerResult, StreamHandler } from './types';
+import type { Options, OutputDetails, OutputStreamHandler } from './types';
 
 export * from './types';
+export * from './streams';
+export { toStreams } from './helpers';
 
-const collectionsToIgnore = [/^system\./, /^__/];
-
-let log = console.log;
-
-export const defaultOptions = Object.freeze<Omit<Options, 'uri' | 'destinationPath'>>({
-  collections: undefined,
-  includeMetadata: false,
-  cleanDestination: true,
-  options: undefined,
-  serializer: 'bson',
-  stream: undefined,
-  logger: log,
-  query: {},
-});
-
-const makeDirectory = async (path: string, { clean }: { clean?: boolean } = {}) => {
-  try {
-    const stats = await fs.stat(path);
-
-    if (!stats.isDirectory()) {
-      throw new Error(`Path is not a directory: ${path}`);
-    }
-
-    if (clean) {
-      await fs.rm(path, { force: true, recursive: true });
-      await fs.mkdir(path);
-    }
-
-    return path;
-  } catch (err) {
-    if (isError(err) && err.code === 'ENOENT') {
-      log(`Creating directory: ${path}`);
-      return fs.mkdir(path);
-    }
-
-    throw err;
-  }
-};
+type MetadataHandler = (collection: Collection) => Promise<void>;
+type StreamHandler<S extends StreamType> = (collectionName: string, stream: S) => Promise<void>;
+type GetOutputStream = StreamHandler<Readable & AsyncIterable<Document>>;
+type WriteOutputStream = StreamHandler<Writable>;
 
 const getCollectionsData = async (
   db: Db,
   handleMetadata: MetadataHandler,
-  outputStream: StreamHandler,
-  { query = {}, collections: allowedCollections }: Options,
+  outputStream: GetOutputStream,
+  { query = {}, collections: allowedCollections, logger, collectionNameMatchers }: Options,
 ) => {
   const collections = allowedCollections
     ? allowedCollections.map((collectionName) => db.collection(collectionName))
@@ -58,107 +25,101 @@ const getCollectionsData = async (
 
   return Promise.allSettled(
     collections
-      .filter((collection) => collectionsToIgnore.every((regex) => !regex.test(collection.collectionName)))
+      .filter((collection) => collectionNameMatchers.every((checker) => checker(collection.collectionName)))
       .map(async (collection) => {
-        log(`Processing '${collection.collectionName}'`);
-        await handleMetadata(collection);
+        logger(`Processing '${collection.collectionName}'`);
 
         const stream = collection.find(query).stream();
 
-        await outputStream(collection.collectionName, stream);
-        log(`Saved ${collection.collectionName}`);
+        await Promise.all([await handleMetadata(collection), await outputStream(collection.collectionName, stream)]);
+
+        logger(`Exported '${collection.collectionName}'`);
 
         return collection.collectionName;
       }),
   );
 };
 
-export const toStream = (cb: (doc: Document) => Buffer | Promise<Buffer>) =>
-  new Transform({
-    objectMode: true,
-    transform(chunk, encoding, callback) {
-      try {
-        Promise.resolve(cb(chunk))
-          .then((result) => {
-            callback(null, result);
-          })
-          .catch(callback);
-      } catch (err) {
-        callback(err as Error);
-      }
-    },
-  });
+const writeCollectionsData = async (
+  db: Db,
+  collectionNames: string[],
+  handleMetadata: MetadataHandler,
+  outputStream: WriteOutputStream,
+  { collections: allowedCollections, logger, collectionNameMatchers, restoreBatchSize }: Options,
+) => {
+  const filteredCollectionNames = allowedCollections
+    ? collectionNames.filter((collectionName) => allowedCollections.includes(collectionName))
+    : collectionNames;
 
-const isError = (error: any): error is NodeJS.ErrnoException => error instanceof Error;
+  return Promise.allSettled(
+    filteredCollectionNames
+      .filter((collectionName) => collectionNameMatchers.every((checker) => checker(collectionName)))
+      .map(async (collectionName) => {
+        const collection = db.collection(collectionName);
 
-export default async (options: Options) => {
-  log = options.logger ?? log;
+        logger(`Processing '${collection.collectionName}'`);
 
-  const serializer: SerializerResult = await (() => {
-    if (typeof options.serializer === 'function') {
-      return options.serializer();
-    }
+        const stream = new Writable({
+          objectMode: true,
+          write(chunk, encoding, callback) {
+            collection
+              .insertOne(chunk)
+              .then(() => callback())
+              .catch((err) => callback(err));
+          },
+        });
 
-    const serializerOption = options.serializer?.toLowerCase();
+        await Promise.all([await outputStream(collection.collectionName, stream), await handleMetadata(collection)]);
 
-    const serializerHelper =
-      (serializer: (doc: Document) => Uint8Array | string): SerializerResult['getStream'] =>
-      async () =>
-        toStream((doc) => Buffer.from(serializer(doc)));
+        logger(`Restored ${collection.collectionName}`);
 
-    const bsonSerializer: SerializerResult = {
-      getStream: serializerHelper(BSON.serialize),
-      fileExtension: 'bson',
-    };
-    const jsonSerializer: SerializerResult = {
-      getStream: serializerHelper(JSON.stringify),
-      fileExtension: 'json',
-    };
+        return collection.collectionName;
+      }),
+  );
+};
 
-    switch (serializerOption) {
-      case 'bson':
-        return bsonSerializer;
-      case 'json':
-        return jsonSerializer;
-      default:
-        throw new Error(`Invalid 'serializer' option (${serializerOption})`);
-    }
-  })();
+export const backup = async (
+  client: MongoClient,
+  outputStreamHandler: OutputStreamHandler,
+  options: Readonly<Options>,
+): Promise<PromiseSettledResult<string>[]> => {
+  const log = options.logger;
 
   log('Backup starting...');
-
-  const client = new MongoClient(options.uri, { maxPoolSize: 11, ...options.options });
-  await client.connect();
   const db = client.db();
-
   log('Database opened');
 
-  const outputPath = path.join(options.destinationPath, db.databaseName);
-  const metadataPath = path.join(outputPath, '.metadata');
+  const [serializationStreamHandler, beforeSerializationHandler, afterSerializationHandler, beforeOutputHandler] =
+    await Promise.all([
+      options.serializationStream(),
+      options.transformStream.beforeSerialization?.(),
+      options.transformStream.afterSerialization?.(),
+      options.transformStream.beforeOutput?.(),
+    ]);
 
-  await makeDirectory(outputPath, { clean: options.cleanDestination });
+  const handlePipeline = async (inputStream: Readable, details: Omit<OutputDetails, 'fileExtension'>) => {
+    const outputDetails = { ...details, fileExtension: serializationStreamHandler.fileExtension };
 
-  if (options.includeMetadata !== false) {
-    await makeDirectory(metadataPath);
-  }
+    return Stream.pipeline(
+      [
+        inputStream,
+        await beforeSerializationHandler?.backup(outputDetails),
+        await serializationStreamHandler.serialize(outputDetails),
+        await afterSerializationHandler?.backup(outputDetails),
+        await beforeOutputHandler?.backup(outputDetails),
+        await outputStreamHandler.backup(outputDetails),
+      ].filter((entry): entry is NonNullable<typeof entry> => !!entry),
+    );
+  };
 
-  const handleMetadata: MetadataHandler = async (collection: Collection) => {
-    const indexes = await collection.indexes({
-      full: true,
+  const handleMetadata: MetadataHandler = async (collection: Collection) =>
+    handlePipeline(collection.listIndexes().stream(), {
+      collectionName: collection.collectionName,
+      isMetaData: true,
     });
 
-    await fs.writeFile(path.join(metadataPath, `${collection.collectionName}.json`), JSON.stringify(indexes));
-  };
-
-  const handleCollection: StreamHandler = async (collectionName, dataStream) => {
-    const filePath = path.join(outputPath, `${collectionName}.${serializer.fileExtension}`);
-
-    const outputStream =
-      options.stream?.({ outputPath, collectionName, filePath, fileExtension: serializer.fileExtension }) ??
-      createWriteStream(filePath);
-
-    await Stream.pipeline(dataStream, await serializer.getStream(collectionName), outputStream);
-  };
+  const handleCollection: GetOutputStream = async (collectionName, dataStream) =>
+    handlePipeline(dataStream, { collectionName, isMetaData: false });
 
   const results = await getCollectionsData(
     db,
@@ -167,34 +128,73 @@ export default async (options: Options) => {
     options,
   );
 
-  log('-'.repeat(12));
-  const { successful, errors } = results.reduce<{
-    successful: PromiseFulfilledResult<string>[];
-    errors: PromiseRejectedResult[];
-  }>(
-    (obj, result) => {
-      if (result.status === 'fulfilled') {
-        obj.successful.push(result);
-      } else {
-        obj.errors.push(result);
-      }
+  await client.close();
+  log('Database closed');
 
-      return obj;
-    },
-    { successful: [], errors: [] },
-  );
+  return results;
+};
 
-  log('Successful:');
-  successful.forEach((result) => {
-    log(`\t${result.value}`);
-  });
-  if (errors.length > 0) {
-    log('Errors:');
-    errors.forEach((result) => {
-      console.error(result.reason);
+export const restore = async (
+  client: MongoClient,
+  outputStreamHandler: OutputStreamHandler,
+  options: Readonly<Options>,
+) => {
+  const log = options.logger;
+
+  log('Restore starting...');
+  const db = client.db();
+  log('Database opened');
+
+  const [serializationStreamHandler, beforeSerializationHandler, afterSerializationHandler, beforeOutputHandler] =
+    await Promise.all([
+      options.serializationStream(),
+      options.transformStream.beforeSerialization?.(),
+      options.transformStream.afterSerialization?.(),
+      options.transformStream.beforeOutput?.(),
+    ]);
+
+  const handlePipeline = async (outputStream: Writable, details: Omit<OutputDetails, 'fileExtension'>) => {
+    const outputDetails = { ...details, fileExtension: serializationStreamHandler.fileExtension };
+
+    return Stream.pipeline(
+      [
+        await outputStreamHandler.restore.getCollection(outputDetails),
+        await afterSerializationHandler?.restore(outputDetails),
+        await serializationStreamHandler.deserialize(outputDetails),
+        await beforeSerializationHandler?.restore(outputDetails),
+        await beforeOutputHandler?.restore(outputDetails),
+        outputStream,
+      ].filter((entry): entry is NonNullable<typeof entry> => !!entry),
+    );
+  };
+
+  const handleMetadata: MetadataHandler = async (collection: Collection) => {
+    const stream = new Writable({
+      objectMode: true,
+      write(chunk, encoding, callback) {
+        collection
+          .createIndexes([chunk])
+          .then(() => callback())
+          .catch((err) => callback(err));
+      },
     });
-  }
+
+    return handlePipeline(stream, { isMetaData: true, collectionName: collection.collectionName });
+  };
+
+  const handleCollection: WriteOutputStream = async (collectionName, dataStream) =>
+    handlePipeline(dataStream, { collectionName, isMetaData: false });
+
+  const results = await writeCollectionsData(
+    db,
+    await outputStreamHandler.restore.getCollectionNames(),
+    options.includeMetadata === true ? handleMetadata : () => Promise.resolve(),
+    handleCollection,
+    options,
+  );
 
   await client.close();
   log('Database closed');
+
+  return results;
 };

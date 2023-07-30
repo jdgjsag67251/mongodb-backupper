@@ -1,54 +1,97 @@
-import fs from 'fs/promises';
-import path from 'path';
+import { MongoClient } from 'mongodb';
+import merge from 'lodash.merge';
 
-import driver, { Options, defaultOptions } from './driver';
+import { Options, OutputStreamHandler } from './types';
+import { PrivateConstructor } from './helpers';
+import { backup, restore } from './driver';
+import * as streams from './streams';
 
-/**
- * Determines if the provided path is a directory
- *
- * @param path
- */
-const checkDirectory = async (path: string): Promise<{ exists: boolean; isDirectory: boolean }> => {
-  try {
-    await fs.access(path, fs.constants.R_OK | fs.constants.W_OK);
-  } catch {
-    return { exists: false, isDirectory: false };
+export * from './driver';
+
+export const defaultCollectionNameMatchers = Object.freeze<Options['collectionNameMatchers']>(
+  [/^system\./, /^__/].map((regex) => (name: string) => !regex.test(name)),
+);
+
+export const defaultOptions = Object.freeze<Options>({
+  collectionNameMatchers: defaultCollectionNameMatchers,
+  serializationStream: streams.bsonSerializer(),
+  collections: undefined,
+  includeMetadata: false,
+  restoreBatchSize: 12,
+  transformStream: {},
+  logger: () => {},
+  query: {},
+  options: {
+    maxPoolSize: 11,
+  },
+});
+
+export default class MongoDBBackupper extends PrivateConstructor {
+  #outputStreamHandler: OutputStreamHandler;
+  #client: MongoClient;
+  #options: Options;
+
+  get options(): Readonly<Options> {
+    return { ...this.#options };
   }
 
-  const stats = await fs.stat(path);
+  private constructor(client: MongoClient, outputStreamHandler: OutputStreamHandler, options: Options) {
+    super();
 
-  return { exists: true, isDirectory: stats.isDirectory() };
-};
-
-export default async function backup(options: Options) {
-  const optionsWithDefaults = { ...defaultOptions, ...options };
-
-  if (!optionsWithDefaults.uri || typeof optionsWithDefaults.uri !== 'string') {
-    throw new Error('Missing `uri` option');
+    this.#outputStreamHandler = outputStreamHandler;
+    this.#options = options;
+    this.#client = client;
   }
 
-  if (!optionsWithDefaults.stream) {
-    if (!optionsWithDefaults.destinationPath) {
-      throw new Error('Missing `destinationPath` option');
+  async backup() {
+    return backup(this.#client, this.#outputStreamHandler, this.#options);
+  }
+
+  async restore() {
+    return restore(this.#client, this.#outputStreamHandler, this.#options);
+  }
+
+  static async create(
+    /** URI for MongoDB connection */
+    uri: string,
+    /** Handler for the final output stream */
+    outputStreamHandler: OutputStreamHandler,
+    /** General options */
+    options?: Partial<Options>,
+  ): Promise<MongoDBBackupper> {
+    const formattedOptions = MongoDBBackupper.formatOptions(options);
+
+    const client = new MongoClient(uri, formattedOptions.options);
+    await client.connect();
+
+    // @ts-expect-error
+    return super.handleCreate(MongoDBBackupper)(client, outputStreamHandler, formattedOptions);
+  }
+
+  private static formatOptions(options: Partial<Options> | undefined): Options {
+    const mergedOptions: Options = merge({}, defaultOptions, options ?? {});
+
+    if (
+      !Array.isArray(mergedOptions.collectionNameMatchers) ||
+      mergedOptions.collectionNameMatchers.some((entry) => typeof entry !== 'function')
+    ) {
+      throw new Error('Invalid `collectionNameMatchers` option');
     }
 
-    const { exists, isDirectory } = await checkDirectory(optionsWithDefaults.destinationPath);
-
-    if (!exists) {
-      await fs.mkdir(optionsWithDefaults.destinationPath, { recursive: true });
-    } else if (!isDirectory) {
-      throw new Error('`destinationPath` option is not a directory');
+    if (
+      mergedOptions.collections &&
+      (!Array.isArray(mergedOptions.collections) ||
+        mergedOptions.collections.some((entry) => typeof entry !== 'string'))
+    ) {
+      throw new Error('Invalid `collections` option');
     }
+
+    if (typeof mergedOptions.logger !== 'function') {
+      throw new Error('Invalid `logger` option');
+    }
+
+    mergedOptions.includeMetadata = !!mergedOptions.includeMetadata;
+
+    return mergedOptions;
   }
-
-  const formattedOptions: Options = {
-    ...optionsWithDefaults,
-    destinationPath: path.resolve(String(optionsWithDefaults.destinationPath || '')),
-    collections: Array.isArray(optionsWithDefaults.collections) ? optionsWithDefaults.collections : undefined,
-    query: typeof optionsWithDefaults.query === 'object' ? optionsWithDefaults.query : {},
-    options: typeof optionsWithDefaults.options === 'object' ? optionsWithDefaults.options : {},
-    includeMetadata: !!optionsWithDefaults.includeMetadata,
-  };
-
-  return driver(formattedOptions);
 }
