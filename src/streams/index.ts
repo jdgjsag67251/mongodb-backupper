@@ -6,6 +6,8 @@ import ejsonSerializer from './serializers/ejson';
 
 import zlibCompression from './compression/zlib';
 
+import symmetricEncryption from './encryption/symmetric';
+
 export {
   // Outputs
   fileOutput,
@@ -17,4 +19,7 @@ export {
 
   // Compression
   zlibCompression,
+
+  // Encryption
+  symmetricEncryption,
 };

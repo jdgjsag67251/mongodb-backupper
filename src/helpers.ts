@@ -89,27 +89,23 @@ export const makeDirectory = async (
  *  This means that for every chunk written, it is guaranteed you will get the same chunk out.
  */
 export class ChunkStream {
+  static get delimiter() {
+    return '\n'.charCodeAt(0);
+  }
+
   static createWriter(transformer: (chunk: Buffer) => Buffer | Promise<Buffer> = (chunk) => chunk): Transform {
-    const newLineByte = '\n'.charCodeAt(0);
-
-    const encode = (buffer: Buffer): Buffer => {
-      const bytes: number[] = [];
-
-      buffer.forEach((byte) => {
-        bytes.push(byte);
-        if (byte === newLineByte) {
-          bytes.push(newLineByte);
-        }
-      });
-
-      return Buffer.from(bytes);
-    };
+    const newLineByte = ChunkStream.delimiter;
 
     return new Transform({
       objectMode: true,
       transform(chunk, encoding, callback) {
         Promise.resolve(transformer(chunk))
-          .then((result) => callback(null, Buffer.concat([encode(result), Buffer.from('\n')])))
+          .then((result) => {
+            this.push(ChunkStream.escape(newLineByte, result));
+            this.push('\n');
+
+            callback();
+          })
           .catch(callback);
       },
     });
@@ -118,21 +114,11 @@ export class ChunkStream {
   static createReader(
     transformer: (chunk: Buffer) => Buffer | Document | Promise<Buffer | Document> = (chunk) => chunk,
   ): Transform {
-    const newLineByte = '\n'.charCodeAt(0);
+    const newLineByte = ChunkStream.delimiter;
     const emptyBuffer = Buffer.alloc(0);
     let buffer: Buffer = emptyBuffer;
 
-    const decode = (buffer: Buffer) => {
-      const unescaped: number[] = [];
-
-      buffer.forEach((byte, index) => {
-        if (buffer[index - 1] !== newLineByte) {
-          unescaped.push(byte);
-        }
-      });
-
-      return transformer(Buffer.from(unescaped));
-    };
+    const decode = (buffer: Buffer) => transformer(ChunkStream.unescape(newLineByte, buffer));
 
     const transform = new Transform({
       objectMode: true,
@@ -171,5 +157,30 @@ export class ChunkStream {
     });
 
     return transform;
+  }
+
+  static escape(delimiter: number, buffer: Buffer) {
+    const bytes: number[] = [];
+
+    buffer.forEach((byte) => {
+      bytes.push(byte);
+      if (byte === delimiter) {
+        bytes.push(delimiter);
+      }
+    });
+
+    return Buffer.from(bytes);
+  }
+
+  static unescape(delimiter: number, buffer: Buffer) {
+    const unescaped: number[] = [];
+
+    buffer.forEach((byte, index) => {
+      if (byte !== delimiter || buffer[index - 1] !== delimiter) {
+        unescaped.push(byte);
+      }
+    });
+
+    return Buffer.from(unescaped);
   }
 }

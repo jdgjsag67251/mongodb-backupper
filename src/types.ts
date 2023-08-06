@@ -28,6 +28,20 @@ export type TransformStreamResult = {
   backup: (details: OutputDetails) => Transform | Promise<Transform>;
 };
 
+export type TransformType = 'backup' | 'restore';
+
+export type EventInstanceHandle = Readonly<{
+  id: string;
+  remove: () => void;
+}>;
+
+export type EventInstanceCallback = () => void | Promise<void>;
+
+export interface IEventInstance {
+  /** Called after every collection has been handled */
+  onEnd: (callback: EventInstanceCallback) => EventInstanceHandle;
+}
+
 export type Options = {
   /** Data serializer (default: `bsonSerializer`) */
   serializationStream: SerializationStreamHandler;
@@ -40,21 +54,21 @@ export type Options = {
      *  Accepts a document\
      *  Returns a document
      */
-    beforeSerialization: (() => Promise<TransformStreamResult>)[];
+    beforeSerialization: ((type: TransformType, eventInstance: IEventInstance) => Promise<TransformStreamResult>)[];
     /**
      * Transform the documents before serialization\
      *  Every chunk is guaranteed to be a document\
      *  Accepts a serialized document\
      *  Returns a (modified) serialized document
      */
-    afterSerialization: (() => Promise<TransformStreamResult>)[];
+    afterSerialization: ((type: TransformType, eventInstance: IEventInstance) => Promise<TransformStreamResult>)[];
     /**
      * Transform the serialized stream before writing to the output stream\
      *  Chunks are NOT guaranteed to be a document\
      *  Accepts a buffer stream\
      *  Returns a buffer stream
      */
-    beforeOutput: (() => Promise<TransformStreamResult>)[];
+    beforeOutput: ((type: TransformType, eventInstance: IEventInstance) => Promise<TransformStreamResult>)[];
   };
   /** Collections to be exported */
   collections: string[] | undefined;

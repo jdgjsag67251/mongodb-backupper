@@ -3,6 +3,7 @@ import { promises as Stream, Readable, Writable, Transform } from 'stream';
 import type { Stream as StreamType } from 'stream';
 
 import type { Options, OutputDetails, OutputStreamHandler } from './types';
+import createEventInstance from './events';
 
 export * from './types';
 export * from './streams';
@@ -89,12 +90,14 @@ export const backup = async (
   const db = client.db();
   log('Database opened');
 
+  const [eventInstance, emit] = createEventInstance();
+
   const [serializationStreamHandler, beforeSerializationHandlers, afterSerializationHandlers, beforeOutputHandlers] =
     await Promise.all([
       options.serializationStream(),
-      Promise.all(options.transformStream.beforeSerialization.map((func) => func())),
-      Promise.all(options.transformStream.afterSerialization.map((func) => func())),
-      Promise.all(options.transformStream.beforeOutput.map((func) => func())),
+      Promise.all(options.transformStream.beforeSerialization.map((func) => func('backup', eventInstance))),
+      Promise.all(options.transformStream.afterSerialization.map((func) => func('backup', eventInstance))),
+      Promise.all(options.transformStream.beforeOutput.map((func) => func('backup', eventInstance))),
     ]);
 
   const handlePipeline = async (inputStream: Readable, details: Omit<OutputDetails, 'fileExtension'>) => {
@@ -128,6 +131,8 @@ export const backup = async (
     options,
   );
 
+  await emit('end');
+
   await client.close();
   log('Database closed');
 
@@ -145,12 +150,14 @@ export const restore = async (
   const db = client.db();
   log('Database opened');
 
+  const [eventInstance, emit] = createEventInstance();
+
   const [serializationStreamHandler, beforeSerializationHandlers, afterSerializationHandlers, beforeOutputHandlers] =
     await Promise.all([
       options.serializationStream(),
-      Promise.all(options.transformStream.beforeSerialization.map((func) => func())),
-      Promise.all(options.transformStream.afterSerialization.map((func) => func())),
-      Promise.all(options.transformStream.beforeOutput.map((func) => func())),
+      Promise.all(options.transformStream.beforeSerialization.map((func) => func('restore', eventInstance))),
+      Promise.all(options.transformStream.afterSerialization.map((func) => func('restore', eventInstance))),
+      Promise.all(options.transformStream.beforeOutput.map((func) => func('restore', eventInstance))),
     ]);
 
   const handlePipeline = async (outputStream: Writable, details: Omit<OutputDetails, 'fileExtension'>) => {
@@ -192,6 +199,8 @@ export const restore = async (
     handleCollection,
     options,
   );
+
+  await emit('end');
 
   await client.close();
   log('Database closed');
