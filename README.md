@@ -17,3 +17,10 @@ const results = await backupper.backup();
 
 await backupper.restore();
 ```
+
+## Features
+
+- 🔒 Encryption support
+- 🗜️ Compression support
+- 🚀 Low memory usage (everything is streamed)
+- 🔌 Extensible
